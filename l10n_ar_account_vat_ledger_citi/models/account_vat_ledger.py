@@ -15,6 +15,7 @@ _logger = logging.getLogger(__name__)
 class AccountVatLedger(models.Model):
     _inherit = "account.vat.ledger"
 
+    txt_type = fields.Selection([('citi', 'Citi'), ('iva_digital', 'IVA Digital')], required=True, default='citi')
     citi_skip_invoice_tests = fields.Boolean(
         string='Skip invoice tests?',
         help='If you skip invoice tests probably you will have errors when '
@@ -37,6 +38,10 @@ class AccountVatLedger(models.Model):
         'REGINFO_CV_CBTE',
         readonly=True,
     )
+    REGINFO_CV_CBTE_IMPORTACIONES = fields.Text(
+        'REGINFO_CV_CBTE_IMPORTACIONES',
+        readonly=True,
+    )
     REGINFO_CV_CABECERA = fields.Text(
         'REGINFO_CV_CABECERA',
         readonly=True,
@@ -46,6 +51,16 @@ class AccountVatLedger(models.Model):
         readonly=True
     )
     vouchers_filename = fields.Char(
+        readonly=True,
+        compute='_compute_files',
+    )
+    impo_vouchers_file = fields.Binary(
+        _('Import Vouchers File'),
+        compute='_compute_files',
+        readonly=True
+    )
+    impo_vouchers_filename = fields.Char(
+        _('Import Vouchers Filename'),
         readonly=True,
         compute='_compute_files',
     )
@@ -110,6 +125,7 @@ class AccountVatLedger(models.Model):
     @api.multi
     @api.depends(
         'REGINFO_CV_CBTE',
+        'REGINFO_CV_CBTE_IMPORTACIONES',
         'REGINFO_CV_ALICUOTAS',
         'type',
         # 'period_id.name'
@@ -143,6 +159,14 @@ class AccountVatLedger(models.Model):
             )
             self.vouchers_file = base64.encodestring(
                 self.REGINFO_CV_CBTE.encode('ISO-8859-1'))
+        if self.REGINFO_CV_CBTE_IMPORTACIONES:
+            self.impo_vouchers_filename = _('Import Vouchers_%s_%s.txt') % (
+                self.type,
+                self.date_to,
+                # self.period_id.name
+            )
+            self.impo_vouchers_file = base64.encodestring(
+                self.REGINFO_CV_CBTE_IMPORTACIONES.encode('ISO-8859-1'))
 
     @api.multi
     def compute_citi_data(self):
@@ -162,7 +186,11 @@ class AccountVatLedger(models.Model):
                 lines += v
             self.REGINFO_CV_COMPRAS_IMPORTACIONES = '\r\n'.join(lines)
         alicuotas.update(impo_alicuotas)
-        self.get_REGINFO_CV_CBTE(alicuotas)
+        if self.txt_type == 'citi':
+            self.get_REGINFO_CV_CBTE(alicuotas)
+        else:
+            self.get_REGINFO_CV_CBTE(alicuotas, invoice_type='impo')
+            self.get_REGINFO_CV_CBTE(alicuotas, invoice_type='not_impo')
 
     @api.model
     def get_partner_document_code(self, partner):
@@ -208,11 +236,18 @@ class AccountVatLedger(models.Model):
                         repr(e)))
 
     @api.multi
-    def get_citi_invoices(self, return_skiped=False):
+    def get_citi_invoices(self, return_skiped=False, invoice_type='all'):
         self.ensure_one()
-        invoices = self.env['account.invoice'].search([
+        domain = [
             ('document_type_id.export_to_citi', '=', True),
-            ('id', 'in', self.invoice_ids.ids)], order='date_invoice asc')
+            ('id', 'in', self.invoice_ids.ids)]
+
+        if invoice_type == 'impo':
+            domain.append(('document_type_id.code', '=', '66'))
+        elif invoice_type == 'not_impo':
+            domain.append(('document_type_id.code', '!=', '66'))
+
+        invoices = self.env['account.invoice'].search(domain, order='date_invoice asc')
         if self.citi_skip_lines:
             skip_lines = literal_eval(self.citi_skip_lines)
             if isinstance(skip_lines, int):
@@ -226,10 +261,11 @@ class AccountVatLedger(models.Model):
         return invoices
 
     @api.multi
-    def get_REGINFO_CV_CBTE(self, alicuotas):
+    def get_REGINFO_CV_CBTE(self, alicuotas, invoice_type='all'):
         self.ensure_one()
         res = []
-        invoices = self.get_citi_invoices()
+        invoices = self.get_citi_invoices(invoice_type=invoice_type)
+        is_citi = self.txt_type == 'citi'
         if not self.citi_skip_invoice_tests:
             invoices.check_argentinian_invoice_taxes()
         if self.type == 'purchase':
@@ -302,14 +338,15 @@ class AccountVatLedger(models.Model):
                 #     'ascii', 'replace').ljust(30, ' ')[:30],
 
                 # Campo 9: Importe Total de la Operación.
-                self.format_amount(inv.cc_amount_total, invoice=inv),
+                self.format_amount(inv.cc_amount_total if is_citi else inv.amount_total, invoice=inv),
 
                 # Campo 10: Importe total de conceptos que no integran el
                 # precio neto gravado
                 self.format_amount(
-                    inv.cc_vat_untaxed_base_amount, invoice=inv),
+                    inv.cc_vat_untaxed_base_amount if is_citi else inv.vat_untaxed_base_amount,
+                    invoice=inv),
             ]
-
+            amount_field = 'cc_amount' if is_citi else 'amount_total'
             if self.type == 'sale':
                 row += [
                     # Campo 11: Percepción a no categorizados
@@ -319,17 +356,17 @@ class AccountVatLedger(models.Model):
                             r.tax_id.tax_group_id.tax == 'vat' and
                             r.tax_id.tax_group_id.application \
                             == 'national_taxes')
-                        ).mapped('cc_amount')), invoice=inv),
+                        ).mapped(amount_field)), invoice=inv),
 
                     # Campo 12: Importe de operaciones exentas
                     self.format_amount(
-                        inv.cc_vat_exempt_base_amount, invoice=inv),
+                        inv.cc_vat_exempt_base_amount if is_citi else inv.vat_exempt_base_amount, invoice=inv),
                 ]
             else:
                 row += [
                     # Campo 11: Importe de operaciones exentas
                     self.format_amount(
-                        inv.cc_vat_exempt_base_amount, invoice=inv),
+                        inv.cc_vat_exempt_base_amount if is_citi else inv.vat_exempt_base_amount, invoice=inv),
 
                     # Campo 12: Importe de percepciones o pagos a cuenta del
                     # Impuesto al Valor Agregado
@@ -339,8 +376,7 @@ class AccountVatLedger(models.Model):
                             r.tax_id.tax_group_id.tax == 'vat' and
                             r.tax_id.tax_group_id.application \
                             == 'national_taxes')
-                        ).mapped(
-                            'cc_amount')), invoice=inv),
+                        ).mapped(amount_field)), invoice=inv),
                 ]
 
             row += [
@@ -351,7 +387,7 @@ class AccountVatLedger(models.Model):
                         r.tax_id.tax_group_id.type == 'perception' and
                         r.tax_id.tax_group_id.tax != 'vat' and
                         r.tax_id.tax_group_id.application == 'national_taxes')
-                    ).mapped('cc_amount')), invoice=inv),
+                    ).mapped(amount_field)), invoice=inv),
 
                 # Campo 14: Importe de percepciones de ingresos brutos
                 self.format_amount(
@@ -359,21 +395,21 @@ class AccountVatLedger(models.Model):
                         r.tax_id.tax_group_id.type == 'perception' and
                         r.tax_id.tax_group_id.application \
                         == 'provincial_taxes')
-                    ).mapped('cc_amount')), invoice=inv),
+                    ).mapped(amount_field)), invoice=inv),
 
                 # Campo 15: Importe de percepciones de impuestos municipales
                 self.format_amount(
                     sum(inv.tax_line_ids.filtered(lambda r: (
                         r.tax_id.tax_group_id.type == 'perception' and
                         r.tax_id.tax_group_id.application == 'municipal_taxes')
-                    ).mapped('cc_amount')), invoice=inv),
+                    ).mapped(amount_field)), invoice=inv),
 
                 # Campo 16: Importe de impuestos internos
                 self.format_amount(
                     sum(inv.tax_line_ids.filtered(
                         lambda r: r.tax_id.tax_group_id.application \
                         == 'internal_taxes'
-                    ).mapped('cc_amount')), invoice=inv),
+                    ).mapped(amount_field)), invoice=inv),
 
                 # Campo 17: Código de Moneda
                 str(currency_code),
@@ -400,7 +436,7 @@ class AccountVatLedger(models.Model):
                         sum(inv.tax_line_ids.filtered(
                             lambda r: r.tax_id.tax_group_id.application \
                             == 'others'
-                        ).mapped('cc_amount')), invoice=inv),
+                        ).mapped(amount_field)), invoice=inv),
 
                     # Campo 22: vencimiento comprobante (no figura en
                     # instructivo pero si en aplicativo) para tique y factura
@@ -437,15 +473,14 @@ class AccountVatLedger(models.Model):
                             'Computable"'))
                 else:
                     row.append(self.format_amount(
-                        inv.cc_vat_amount, invoice=inv))
+                        inv.cc_vat_amount if is_citi else inv.vat_amount, invoice=inv))
 
                 row += [
                     # Campo 22: Otros Tributos
                     self.format_amount(
                         sum(inv.tax_line_ids.filtered(lambda r: (
                             r.tax_id.tax_group_id.application \
-                            == 'others')).mapped(
-                            'cc_amount')), invoice=inv),
+                            == 'others')).mapped(amount_field)), invoice=inv),
 
                     # TODO implementar estos 3
                     # Campo 23: CUIT Emisor / Corredor
@@ -465,7 +500,10 @@ class AccountVatLedger(models.Model):
                     self.format_amount(0, invoice=inv),
                 ]
             res.append(''.join(row))
-        self.REGINFO_CV_CBTE = '\r\n'.join(res)
+        if invoice_type == 'impo':
+            self.REGINFO_CV_CBTE_IMPORTACIONES = '\r\n'.join(res)
+        else:
+            self.REGINFO_CV_CBTE = '\r\n'.join(res)
 
     @api.multi
     def get_tax_row(self, invoice, base, code, tax_amount, impo=False):
@@ -550,10 +588,8 @@ class AccountVatLedger(models.Model):
         # si no hay alicuotas, sumamos una de esta con 0, 0, 0 en detalle
         # usamos mapped por si hay afip codes duplicados (ej. manual y
         # auto)
-        if impo:
-            invoices = self.get_citi_invoices().filtered(lambda r: r.document_type_id.code == '66')
-        else:
-            invoices = self.get_citi_invoices().filtered(lambda r: r.document_type_id.code != '66')
+        invoices = self.get_citi_invoices(invoice_type='impo' if impo else 'not_impo')
+        is_citi = self.txt_type == 'citi'
         for inv in invoices:
             lines = []
             is_zero = inv.currency_id.is_zero
@@ -576,8 +612,8 @@ class AccountVatLedger(models.Model):
             for afip_code in vat_taxes.mapped('tax_id.tax_group_id.afip_code'):
                 taxes = vat_taxes.filtered(
                     lambda x: x.tax_id.tax_group_id.afip_code == afip_code)
-                imp_neto = sum(taxes.mapped('cc_base'))
-                imp_liquidado = sum(taxes.mapped('cc_amount'))
+                imp_neto = sum(taxes.mapped('cc_base' if is_citi else 'base'))
+                imp_liquidado = sum(taxes.mapped('cc_amount' if is_citi else 'amount_total'))
                 lines.append(''.join(self.get_tax_row(
                     inv,
                     imp_neto,
