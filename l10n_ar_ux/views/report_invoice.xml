@@ -2,9 +2,26 @@
 <odoo>
 
     <template id="custom_header" inherit_id="l10n_ar.custom_header">
+        <!-- usar datos de header_adress en vez de company -->
         <img t-if="o.company_id.logo" position="replace">
             <img t-if="header_address.image_1920" t-att-src="image_data_uri(header_address.image_1920)" style="max-height: 45px;" alt="Logo"/>
         </img>
+        <span t-field="o.company_id.partner_id.name" position="attributes">
+            <attribute name="t-field">header_address.name</attribute>
+        </span>
+        <span t-field="o.company_id.l10n_ar_afip_responsibility_type_id" position="attributes">
+            <attribute name="t-field">header_address.l10n_ar_afip_responsibility_type_id</attribute>
+        </span>
+        <span t-field="o.company_id.partner_id.l10n_ar_formatted_vat" position="attributes">
+            <attribute name="t-field">header_address.l10n_ar_formatted_vat</attribute>
+        </span>
+        <span t-esc="o.company_id.l10n_ar_gross_income_type == 'exempt' and 'Exento' or o.company_id.l10n_ar_gross_income_number" position="attributes">
+            <attribute name="t-esc">header_address.l10n_ar_gross_income_type == 'exempt' and 'Exento' or header_address.l10n_ar_gross_income_number</attribute>
+        </span>
+        <span t-field="o.company_id.l10n_ar_afip_start_date" position="attributes">
+            <attribute name="t-field">header_address.start_date</attribute>
+        </span>
+
         <!-- tal vez tambien a este div principal le querramos cambiar la fuente como haciamos antes, aunque en realidad aparentemente ya no ex necesario, era algo asi:
         <div t-att-style="o.company_id.external_report_layout_id.key == 'web.external_layout_standard' and 'font-size: 15px;'">
          -->
@@ -18,6 +35,13 @@
     </template>
 
     <template id="report_invoice_document" inherit_id="l10n_ar.report_invoice_document">
+        <t t-if="o.ref" position="after">
+            <t t-if="o._fields.get('purchase_order_number') and o.purchase_order_number">
+                <br/><strong>PO Number:</strong>
+                <span t-field="o.purchase_order_number"/>
+            </t>
+        </t>
+
         <p name="comment" position="before">
             <p t-if="o._fields.get('move_currency_id') and o.move_currency_id">
                 El total de este comprobante equivale a un total de <span t-raw="o.amount_total / o.move_inverse_currency_rate" t-options="{'widget': 'monetary', 'display_currency': o.move_currency_id}"/> a un tipo de cambio consignado de <span t-field="o.move_inverse_currency_rate"/>
@@ -26,6 +50,13 @@
     </template>
 
     <template id="report_invoice_document_with_payments" inherit_id="l10n_ar.report_invoice_document_with_payments">
+        <t t-if="o.ref" position="after">
+            <t t-if="o._fields.get('purchase_order_number') and o.purchase_order_number">
+                <br/><strong>PO Number:</strong>
+                <span t-field="o.purchase_order_number"/>
+            </t>
+        </t>
+
         <p name="comment" position="before">
             <p t-if="o._fields.get('move_currency_id') and o.move_currency_id">
                 El total de este comprobante equivale a un total de <span t-raw="o.amount_total / o.move_inverse_currency_rate" t-options="{'widget': 'monetary', 'display_currency': o.move_currency_id}"/> a un tipo de cambio consignado de <span t-field="o.move_inverse_currency_rate"/>
