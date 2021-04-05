@@ -5,14 +5,20 @@
 from .pyi25 import PyI25
 from odoo import fields, models, api, _
 from odoo.exceptions import UserError
+from odoo.tools import float_repr
 import base64
 from io import BytesIO
 import logging
+import json
 import sys
 import traceback
 from datetime import datetime
 _logger = logging.getLogger(__name__)
 
+try:
+    import qrcode
+except ImportError:
+    qrcode = None
 try:
     from pysimplesoap.client import SoapFault
 except ImportError:
@@ -71,7 +77,17 @@ class AccountInvoice(models.Model):
     afip_cae_due = fields.Date(
         related='afip_auth_code_due'
     )
-
+    afip_qr_code = fields.Char(
+        compute='_compute_qr_code',
+        string='AFIP QR Code'
+    )
+    afip_qr_code_img = fields.Binary(
+        compute='_compute_qr_code',
+        string='AFIP QR Code Image'
+    )
+    # TODO do not used afip_barcode and afip_barcode_img are deprecated,
+    # use afip_qr_code fields instead, we leave this fields to avoid problems
+    # in stable versions and customized invoice reports.
     afip_barcode = fields.Char(
         compute='_compute_barcode',
         string='AFIP Barcode'
@@ -134,6 +150,48 @@ class AccountInvoice(models.Model):
                     except Exception:
                         validation_type = False
                 rec.validation_type = validation_type
+
+    @api.depends('afip_auth_code')
+    def _compute_qr_code(self):
+        for rec in self:
+            qr_code = False
+            if rec.afip_auth_code and rec.afip_auth_mode in ['CAE', 'CAEA']:
+                data = {
+                    'ver': 1,
+                    'fecha': rec.date_invoice,
+                    'cuit': rec.company_id.partner_id._get_id_number_sanitize(),
+                    'ptoVta': rec.journal_id.point_of_sale_number,
+                    'tipoCmp': int(rec.document_type_id.code),
+                    'nroCmp': int(rec.invoice_number),
+                    'importe': float(float_repr(rec.amount_total, precision_digits=2)),
+                    'moneda': rec.currency_id.afip_code,
+                    'ctz': float(float_repr(rec.currency_rate, precision_digits=6)),
+                    'tipoCodAut': 'E' if rec.afip_auth_mode == 'CAE' else 'A',
+                    'codAut': int(rec.afip_auth_code),
+                }
+                if rec.commercial_partner_id.main_id_number:
+                    data.update({'nroDocRec': rec.commercial_partner_id._get_id_number_sanitize()})
+                if rec.commercial_partner_id.main_id_category_id:
+                    data.update({'tipoDocRec': rec.commercial_partner_id.main_id_category_id.afip_code})
+                qr_code = 'https://www.afip.gob.ar/fe/qr/?p=%s' % base64.b64encode(json.dumps(
+                    data, indent=None).encode('ascii')).decode('ascii')
+
+            rec.afip_qr_code = qr_code
+            rec.afip_qr_code_img = rec._make_image_QR(qr_code)
+
+    @api.model
+    def _make_image_QR(self, qr_code):
+        """ Generate the required QR code """
+        image = False
+        if qr_code:
+            qr_obj = qrcode.QRCode()
+            output = BytesIO()
+            qr_obj.add_data(qr_code)
+            qr_obj.make(fit=True)
+            qr_img = qr_obj.make_image()
+            qr_img.save(output)
+            image = base64.b64encode(output.getvalue())
+        return image
 
     @api.multi
     @api.depends('afip_auth_code')
@@ -211,9 +269,12 @@ class AccountInvoice(models.Model):
             ([52, 53], [51, 52, 53, 54, 88, 991]),
             ([1, 6, 51], [88, 991]),
             ([201, 206, 211], [91, 990, 991, 993, 994, 995]),
-            ([202, 203], [201, 202, 203] if self.afip_fce_es_anulacion else [201, 91, 88, 988, 990, 991, 993, 994, 995, 996, 997]),
-            ([207, 208], [206, 207, 208] if self.afip_fce_es_anulacion else [206, 91, 88, 988, 990, 991, 993, 994, 995, 996, 997]),
-            ([212, 213], [211, 212, 213] if self.afip_fce_es_anulacion else [211, 91, 88, 988, 990, 991, 993, 994, 995, 996, 997]),
+            ([202, 203], [201, 202, 203] if self.afip_fce_es_anulacion
+                else [201, 91, 88, 988, 990, 991, 993, 994, 995, 996, 997]),
+            ([207, 208], [206, 207, 208] if self.afip_fce_es_anulacion
+                else [206, 91, 88, 988, 990, 991, 993, 994, 995, 996, 997]),
+            ([212, 213], [211, 212, 213] if self.afip_fce_es_anulacion
+                else [211, 91, 88, 988, 990, 991, 993, 994, 995, 996, 997]),
         ]
         available_codes = list(filter(lambda x: int(self.document_type_id.code) in x[0], code_rules))
         available_codes = available_codes[0][1] if available_codes else []
@@ -663,6 +724,14 @@ print "Observaciones:", wscdc.Obs
                     ws.AgregarOpcional(
                         opcional_id=2101,
                         valor=inv.partner_bank_id.cbu)
+
+                    # agregamos tipo de transmision si esta definido
+                    transmission_type = self.env['ir.config_parameter'].sudo().get_param(
+                        'l10n_ar_edi.fce_transmission', '')
+                    if transmission_type:
+                        ws.AgregarOpcional(
+                            opcional_id=27,
+                            valor=transmission_type)
                     if inv.name:
                         ws.AgregarOpcional(
                             opcional_id=23,
