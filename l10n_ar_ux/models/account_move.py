@@ -70,11 +70,12 @@ class AccountMove(models.Model):
         """ We overwrite original method odoo/odoo/l10n_latam_invoice_document in order to be able to search for
         document numbers that has POS of 4 or 5 digits. In 13.0 we will always have 5 digits, but we need this for
         compatibility of old version migrated clients that have used 4 digits POS numbers """
-        others = self.filtered(lambda x: x.company_id.country_id.code != 'AR')
-        super(AccountMove, others)._check_unique_vendor_number()
-        for rec in (self - others).filtered(lambda x: x.is_purchase_document() and x.l10n_latam_use_documents
-                                            and x.l10n_latam_document_number):
+        ar_purchase_use_document = self.filtered(
+            lambda x: x.company_id.country_id.code == 'AR' and x.is_purchase_document() and x.l10n_latam_use_documents
+            and x.l10n_latam_document_number and x.l10n_latam_document_type_id.code)
 
+        super(AccountMove, self - ar_purchase_use_document)._check_unique_vendor_number()
+        for rec in ar_purchase_use_document:
             # Old 4 digits name
             number = rec._l10n_ar_get_document_number_parts(
                 rec.l10n_latam_document_number, rec.l10n_latam_document_type_id.code)
@@ -98,3 +99,23 @@ class AccountMove(models.Model):
         Documents already guarantee to not encode twice same vendor bill """
         return super(
             AccountMove, self.filtered(lambda x: not x.l10n_latam_use_documents))._check_duplicate_supplier_reference()
+
+    def _get_name_invoice_report(self, report_xml_id):
+        """Use always argentinian like report (regardless use documents)"""
+        self.ensure_one()
+        if self.company_id.country_id.code == 'AR':
+            custom_report = {
+                'account.report_invoice_document_with_payments': 'l10n_ar.report_invoice_document_with_payments',
+                'account.report_invoice_document': 'l10n_ar.report_invoice_document',
+            }
+            return custom_report.get(report_xml_id) or report_xml_id
+        return super()._get_name_invoice_report(report_xml_id)
+
+    def _get_l10n_latam_documents_domain(self):
+        self.ensure_one()
+        domain = super()._get_l10n_latam_documents_domain()
+        if self.journal_id.company_id.country_id == self.env.ref('base.ar') and self.journal_id.l10n_ar_afip_pos_system == 'not_applicable':
+            domain = [
+                ('internal_type', 'in', ['credit_note'] if self.type in ['out_refund', 'in_refund'] else ['invoice', 'debit_note']),
+                ('id', 'in', self.journal_id.l10n_ar_document_type_ids.ids)]
+        return domain
