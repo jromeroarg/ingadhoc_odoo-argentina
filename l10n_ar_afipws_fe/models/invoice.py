@@ -135,6 +135,12 @@ class AccountInvoice(models.Model):
         '- SI: sí el comprobante asociado (original) se encuentra rechazado por el comprador\n'
         '- NO: sí el comprobante asociado (original) NO se encuentra rechazado por el comprador'
     )
+    afip_asoc_period_start = fields.Date(
+        'Perido Asociado Desde',
+        help='Agregue este valor sólo si es una nota de débito o crédito y no tiene comprobante original asociado')
+    afip_asoc_period_end = fields.Date(
+        'Perido Asociado Hasta',
+        help='Agregue este valor sólo si es una nota de débito o crédito y no tiene comprobante original asociado')
 
     @api.depends('journal_id', 'afip_auth_code')
     def _compute_validation_type(self):
@@ -269,15 +275,18 @@ class AccountInvoice(models.Model):
             ([52, 53], [51, 52, 53, 54, 88, 991]),
             ([1, 6, 51], [88, 991]),
             ([201, 206, 211], [91, 990, 991, 993, 994, 995]),
-            ([202, 203], [201, 202, 203]),
-            ([207, 208], [206, 207, 208]),
-            ([212, 213], [211, 212, 213])
+            ([202, 203], [201, 202, 203] if self.afip_fce_es_anulacion
+                else [201, 91, 88, 988, 990, 991, 993, 994, 995, 996, 997]),
+            ([207, 208], [206, 207, 208] if self.afip_fce_es_anulacion
+                else [206, 91, 88, 988, 990, 991, 993, 994, 995, 996, 997]),
+            ([212, 213], [211, 212, 213] if self.afip_fce_es_anulacion
+                else [211, 91, 88, 988, 990, 991, 993, 994, 995, 996, 997]),
         ]
         available_codes = list(filter(lambda x: int(self.document_type_id.code) in x[0], code_rules))
         available_codes = available_codes[0][1] if available_codes else []
         if self.document_type_internal_type in ['debit_note', 'credit_note'] \
                 and self.origin:
-            return self.search([
+            related_invoice = self.search([
                 ('commercial_partner_id', '=', self.commercial_partner_id.id),
                 ('company_id', '=', self.company_id.id),
                 ('document_number', '=', self.origin),
@@ -287,8 +296,17 @@ class AccountInvoice(models.Model):
                 ('document_type_id.code', 'in', available_codes),
                 ('state', 'not in', ['draft', 'cancel'])],
                 limit=1)
+            if related_invoice:
+                return related_invoice
+            else:
+                if self.sudo().env.ref('base.module_sale').state == 'installed':
+                    original_entry = self.mapped('invoice_line_ids.sale_line_ids.invoice_lines').filtered(
+                        lambda x: x.invoice_id.document_type_id.localization == 'argentina' and
+                        x.invoice_id.document_type_id.internal_type != self.document_type_id.internal_type and
+                        x.invoice_id.afip_result in ['A', 'O'] and x.invoice_id.afip_auth_code).mapped('invoice_id')
+                    return original_entry[0] if original_entry else self.env['account.invoice']
         else:
-            return self.browse()
+            return self.env['account.invoice']
 
     @api.multi
     def invoice_validate(self):
@@ -712,6 +730,14 @@ print "Observaciones:", wscdc.Obs
                     ws.AgregarOpcional(
                         opcional_id=2101,
                         valor=inv.partner_bank_id.cbu)
+
+                    # agregamos tipo de transmision si esta definido
+                    transmission_type = self.env['ir.config_parameter'].sudo().get_param(
+                        'l10n_ar_edi.fce_transmission', '')
+                    if transmission_type:
+                        ws.AgregarOpcional(
+                            opcional_id=27,
+                            valor=transmission_type)
                 elif int(doc_afip_code) in [202, 203, 207, 208, 212, 213]:
                     valor = inv.afip_fce_es_anulacion and 'S' or 'N'
                     ws.AgregarOpcional(
@@ -762,6 +788,13 @@ print "Observaciones:", wscdc.Obs
                         CbteAsoc.invoice_number,
                         self.company_id.cuit,
                         afip_ws != 'wsmtxca' and CbteAsoc.date_invoice.strftime('%Y%m%d') or CbteAsoc.date_invoice.strftime('%Y-%m-%d'),
+                    )
+            else:
+                if afip_ws == 'wsfe' and self.document_type_id.internal_type in ['credit_note', 'debit_note'] and  \
+                   self.afip_asoc_period_start and self.afip_asoc_period_end:
+                    ws.AgregarPeriodoComprobantesAsociados(
+                        fecha_desde=self.afip_asoc_period_start.strftime('%Y%m%d'),
+                        fecha_hasta=self.afip_asoc_period_end.strftime('%Y%m%d'),
                     )
 
             # analize line items - invoice detail
